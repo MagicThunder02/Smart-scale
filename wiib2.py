@@ -1,19 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import collections
-import time
+import datetime
 import bluetooth
 import sys
-import subprocess
+import os
+import time
 import telepot
-import matplotlib
-import datetime
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from pprint import pprint
 from telepot.loop import MessageLoop
-
+import testdb
+import graph
+import requests
 
 # --------- User Settings ---------
 WEIGHT_SAMPLES = 250
@@ -35,7 +33,9 @@ BOTTOM_RIGHT = 1
 TOP_LEFT = 2
 BOTTOM_LEFT = 3
 BLUETOOTH_NAME = "Nintendo RVL-WBC-01"
-CHAT_ID = "520388917"
+CHAT_ID = "<chat_id>"
+TELEGRAM_BOT = "<telegram_botid>"
+
 
 class classToday:
     days = []
@@ -50,20 +50,6 @@ class classToday:
             self.days.append(i)
 
 
-class classPlot:
-    def startgrafico(self):
-        Today = classToday()
-    #    Today.day()
-
-        plt.rcParams["figure.figsize"] = [16, 9]
-        # plt.axis("square")
-        plt.axis([1, 31, 0, 100])
-        plt.plot([weight._weight], [Today.actualday()])
-        plt.savefig("/tmp/mifig2")
-        print("grafico finito!")
-
-
-grafico = classPlot()
 
 
 class EventProcessor:
@@ -76,6 +62,7 @@ class EventProcessor:
         self._weight = 0
 
     def mass(self, event):
+        self._weight = -1
         if self._measureCnt == 1:
             print("Measuring ...")
 
@@ -96,6 +83,7 @@ class EventProcessor:
             if not self._measured:
                 self._measured = True
                 # ---------------
+        return self._weight
 
     @property
     def weight(self):
@@ -121,11 +109,12 @@ class BoardEvent:
         self.totalWeight = topLeft + topRight + bottomLeft + bottomRight
 
 class Wiiboard:
-    def __init__(self, processor):
+    def __init__(self, processor, telegram):
         # Sockets and status
+        self.telegram = telegram
         self.receivesocket = None
         self.controlsocket = None
-
+        
         self.processor = processor
         self.calibration = []
         self.calibrationRequested = False
@@ -169,6 +158,9 @@ class Wiiboard:
             print("Could not connect to Wiiboard at address " + address)
 
     def receive(self):
+        i = 0
+        
+        DB = testdb.classSSdb()
         while self.status == "Connected" and not self.processor.done:
             data = self.receivesocket.recv(25)
             intype = int(data.encode("hex")[2:4])
@@ -183,9 +175,25 @@ class Wiiboard:
                     if packetLength < 16:
                         self.calibrationRequested = False
             elif intype == EXTENSION_8BYTES:
-                self.processor.mass(self.createBoardEvent(data[2:12]))
+                myw = self.processor.mass(self.createBoardEvent(data[2:12]))
+                if myw != -1: 
+                    print("ciao")
+                    i +=1
+                    if i % 4 == 2:
+                #insert is from testdb.py
+                       DB.insert(myw)
+                       self.telegram.tmessage(myw)
+                       self.processor.done = True
+                                         
+                
             else:
                 print("ACK to data write received")
+        # uscendo stampiamo le pesate
+        DB.listWeights()
+        GR = graph.classPlot()
+        img = GR.startgrafico("mifig3.png")
+        self.telegram.sendImage(img)
+        i += 1
 
     def disconnect(self):
         if self.status == "Connected":
@@ -257,7 +265,6 @@ class Wiiboard:
             val = 17 * ((raw - self.calibration[0][pos]) / float((self.calibration[1][pos] - self.calibration[0][pos])))
         elif raw > self.calibration[1][pos]:
             val = 17 + 17 * ((raw - self.calibration[1][pos]) / float((self.calibration[2][pos] - self.calibration[1][pos])))
-
         return val
 
     def getEvent(self):
@@ -318,10 +325,10 @@ class Wiiboard:
 
 
 class TelegramBotClass:
-
+    
 
     def __init__(self):
-        self.ScaleBot = telepot.Bot("563263520:AAGWUSipzDoi4NcyNWQFrkc0PDgjf2tJETo")
+        self.ScaleBot = telepot.Bot(TELEGRAM_BOT)
         me = self.ScaleBot.getMe()
         pprint(me)
         resp = self.ScaleBot.getUpdates()
@@ -334,21 +341,28 @@ class TelegramBotClass:
         txt = msg['text']
         if txt == "/start":
             self.ScaleBot.sendMessage(chat_id, "ok")
-    def tmessage(self):
-        processor = EventProcessor()
-        tmp2 = "il tuo peso è: " + str(round(processor._weight, 1)) + "kg"
+        if txt == "/graph":
+           # self.GR.startgrafico()
+            self.ScaleBot.sendPhoto(chat_id, "/tmp/mifig3.png")
+            self.ScaleBot.sendMessage(chat_id, "ok")
+
+    def tmessage(self, weight):
+        tmp2 = "il tuo peso è: " + str(round(weight, 1)) + "kg"
         self.ScaleBot.sendMessage(CHAT_ID, tmp2)
 
-def main():
+    def sendImage(self, fname):
+       files = {'photo': open(fname, 'rb')}
+       status = requests.post('https://api.telegram.org/bot{}/sendPhoto?chat_id={}'.format(TELEGRAM_BOT, CHAT_ID), files=files)
 
+def main():
     processor = EventProcessor()
     telegram = TelegramBotClass()
     telegram.proc = processor
 
     MessageLoop(telegram.ScaleBot, telegram.handle).run_as_thread()
     telegram.ScaleBot.sendMessage(CHAT_ID, "Avvio Smartscale")
-
-    board = Wiiboard(processor)
+    telegram.ScaleBot.sendMessage(CHAT_ID, "ok")
+    board = Wiiboard(processor, telegram)
     if len(sys.argv) == 1:
         print("Discovering board...")
         address = board.discover()
@@ -375,5 +389,4 @@ def main():
 
 
 if __name__ == "__main__":
-    grafico.startgrafico()
     main()
